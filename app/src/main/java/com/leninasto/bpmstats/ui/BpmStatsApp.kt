@@ -1,6 +1,7 @@
 package com.leninasto.bpmstats.ui
 
 import android.Manifest
+import android.app.Activity
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
@@ -12,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -25,7 +27,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -43,12 +44,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.BatteryFull
+import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.Close
@@ -83,6 +83,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -98,10 +99,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -133,7 +136,7 @@ private enum class ChartRange(val label: String, val durationMs: Long) {
     OneDay("24 h", 24 * 60 * 60 * 1000L),
 }
 
-private data class ChartPoint(val bpm: Int, val elapsedMs: Long)
+private data class ChartPoint(val bpm: Int, val elapsedMs: Long, val held: Boolean = false)
 
 private data class ColorStopConfig(val ppm: Int, val color: Color)
 
@@ -142,6 +145,11 @@ private data class AppUiSettings(
     val lowAlert: Int = 55,
     val highAlert: Int = 165,
     val colorStops: List<ColorStopConfig> = defaultColorStops(4),
+    val keepScreenOnFullscreen: Boolean = false,
+    val showChartGrid: Boolean = true,
+    val showPointMarkers: Boolean = true,
+    val smoothChartLine: Boolean = true,
+    val continuousTrace: Boolean = true,
 )
 
 private object AppSettingsStore {
@@ -170,6 +178,16 @@ private object AppSettingsStore {
 
     fun setColorStops(stops: List<ColorStopConfig>) = update { it.copy(colorStops = stops.normalizedColorStops()) }
 
+    fun setKeepScreenOnFullscreen(enabled: Boolean) = update { it.copy(keepScreenOnFullscreen = enabled) }
+
+    fun setShowChartGrid(enabled: Boolean) = update { it.copy(showChartGrid = enabled) }
+
+    fun setShowPointMarkers(enabled: Boolean) = update { it.copy(showPointMarkers = enabled) }
+
+    fun setSmoothChartLine(enabled: Boolean) = update { it.copy(smoothChartLine = enabled) }
+
+    fun setContinuousTrace(enabled: Boolean) = update { it.copy(continuousTrace = enabled) }
+
     private fun update(transform: (AppUiSettings) -> AppUiSettings) {
         settings = transform(settings)
         saveSettings(settings)
@@ -181,6 +199,11 @@ private object AppSettingsStore {
             lowAlert = preferences.getInt(KEY_LOW_ALERT, 55),
             highAlert = preferences.getInt(KEY_HIGH_ALERT, 165),
             colorStops = preferences.getString(KEY_COLOR_STOPS, null)?.decodeColorStops() ?: defaultColorStops(4),
+            keepScreenOnFullscreen = preferences.getBoolean(KEY_KEEP_SCREEN_ON_FULLSCREEN, false),
+            showChartGrid = preferences.getBoolean(KEY_SHOW_CHART_GRID, true),
+            showPointMarkers = preferences.getBoolean(KEY_SHOW_POINT_MARKERS, true),
+            smoothChartLine = preferences.getBoolean(KEY_SMOOTH_CHART_LINE, true),
+            continuousTrace = preferences.getBoolean(KEY_CONTINUOUS_TRACE, true),
         )
     }
 
@@ -190,6 +213,11 @@ private object AppSettingsStore {
             .putInt(KEY_LOW_ALERT, value.lowAlert)
             .putInt(KEY_HIGH_ALERT, value.highAlert)
             .putString(KEY_COLOR_STOPS, value.colorStops.encodeColorStops())
+            .putBoolean(KEY_KEEP_SCREEN_ON_FULLSCREEN, value.keepScreenOnFullscreen)
+            .putBoolean(KEY_SHOW_CHART_GRID, value.showChartGrid)
+            .putBoolean(KEY_SHOW_POINT_MARKERS, value.showPointMarkers)
+            .putBoolean(KEY_SMOOTH_CHART_LINE, value.smoothChartLine)
+            .putBoolean(KEY_CONTINUOUS_TRACE, value.continuousTrace)
             .apply()
     }
 
@@ -212,6 +240,11 @@ private object AppSettingsStore {
     private const val KEY_LOW_ALERT = "low_alert"
     private const val KEY_HIGH_ALERT = "high_alert"
     private const val KEY_COLOR_STOPS = "color_stops"
+    private const val KEY_KEEP_SCREEN_ON_FULLSCREEN = "keep_screen_on_fullscreen"
+    private const val KEY_SHOW_CHART_GRID = "show_chart_grid"
+    private const val KEY_SHOW_POINT_MARKERS = "show_point_markers"
+    private const val KEY_SMOOTH_CHART_LINE = "smooth_chart_line"
+    private const val KEY_CONTINUOUS_TRACE = "continuous_trace"
 }
 
 private val LiveChartRanges = listOf(
@@ -238,7 +271,6 @@ fun BpmStatsApp(viewModel: HeartRateViewModel = viewModel()) {
     val savedEntries by viewModel.savedEntries.collectAsState()
     val dailySummaries by viewModel.dailySummaries.collectAsState()
     val aliases by viewModel.deviceAliases.collectAsState()
-    val sampleIntervalSeconds by viewModel.sampleIntervalSeconds.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var showAliasDialog by remember { mutableStateOf(false) }
@@ -291,6 +323,7 @@ fun BpmStatsApp(viewModel: HeartRateViewModel = viewModel()) {
             alertState = alertState,
             selectedRange = selectedRange,
             colorStops = colorStops,
+            appSettings = appSettings,
             onExit = { fullScreen = false },
         )
         return
@@ -348,13 +381,13 @@ fun BpmStatsApp(viewModel: HeartRateViewModel = viewModel()) {
                     connectedName = connectedName,
                     signalRssi = signalRssi,
                     batteryLevel = batteryLevel,
-                    sampleIntervalSeconds = sampleIntervalSeconds,
                     entries = sessionEntries,
                     savedEntries = savedEntries,
                     bpmColor = bpmColor,
                     alertState = alertState,
                     selectedRange = selectedRange,
                     colorStops = colorStops,
+                    appSettings = appSettings,
                     onSearch = ::startBleFlow,
                     onDisconnect = viewModel::stopTracking,
                     onDeviceSelected = ::connectDevice,
@@ -362,7 +395,7 @@ fun BpmStatsApp(viewModel: HeartRateViewModel = viewModel()) {
                     onRangeSelected = { selectedRange = it },
                 )
             } else {
-                HistoryTab(summaries = dailySummaries, colorStops = colorStops)
+                HistoryTab(summaries = dailySummaries, colorStops = colorStops, appSettings = appSettings)
             }
 
             if (connectedDevice != null) {
@@ -410,7 +443,6 @@ private fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val appSettings = AppSettingsStore.settings
-    val sampleIntervalSeconds by viewModel.sampleIntervalSeconds.collectAsState()
     var overlayEnabled by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var batteryExempt by remember { mutableStateOf(context.isIgnoringBatteryOptimizations()) }
 
@@ -536,29 +568,30 @@ private fun SettingsScreen(
             }
             item {
                 SettingSection(
-                    title = "Monitor",
+                    title = "Grafico",
+                    icon = Icons.AutoMirrored.Filled.ShowChart,
+                ) {
+                    SettingSwitchRow("Cuadricula", appSettings.showChartGrid, AppSettingsStore::setShowChartGrid)
+                    SettingSwitchRow("Marcar muestras", appSettings.showPointMarkers, AppSettingsStore::setShowPointMarkers)
+                    SettingSwitchRow("Linea suavizada", appSettings.smoothChartLine, AppSettingsStore::setSmoothChartLine)
+                    SettingSwitchRow("Trazo continuo", appSettings.continuousTrace, AppSettingsStore::setContinuousTrace)
+                }
+            }
+            item {
+                SettingSection(
+                    title = "Monitor flotante",
                     icon = Icons.Default.PictureInPictureAlt,
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Widget flotante universal", modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = overlayEnabled,
-                            onCheckedChange = { enabled ->
-                                if (enabled) requestOverlay()
-                                else {
-                                    overlayEnabled = false
-                                    viewModel.hideOverlay()
-                                }
-                            },
-                        )
-                    }
-                    SettingSlider(
-                        label = "Intervalo de guardado",
-                        value = sampleIntervalSeconds,
-                        valueRange = 2f..60f,
-                        enabled = true,
-                        onValueChange = viewModel::setSampleIntervalSeconds,
-                        suffix = "s",
+                    SettingSwitchRow(
+                        title = "Widget universal",
+                        checked = overlayEnabled,
+                        onCheckedChange = { enabled ->
+                            if (enabled) requestOverlay()
+                            else {
+                                overlayEnabled = false
+                                viewModel.hideOverlay()
+                            }
+                        },
                     )
                     OutlinedButton(
                         onClick = ::requestBatteryExemption,
@@ -574,6 +607,18 @@ private fun SettingsScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun SettingSwitchRow(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(title, modifier = Modifier.weight(1f))
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
@@ -610,13 +655,13 @@ private fun MonitorTab(
     connectedName: String?,
     signalRssi: Int?,
     batteryLevel: Int?,
-    sampleIntervalSeconds: Int,
     entries: List<HeartRateEntry>,
     savedEntries: List<HeartRateEntry>,
     bpmColor: Color,
     alertState: String?,
     selectedRange: ChartRange,
     colorStops: List<ColorStopConfig>,
+    appSettings: AppUiSettings,
     onSearch: () -> Unit,
     onDisconnect: () -> Unit,
     onDeviceSelected: (String) -> Unit,
@@ -636,7 +681,6 @@ private fun MonitorTab(
                 connectedName = connectedName,
                 signalRssi = signalRssi,
                 batteryLevel = batteryLevel,
-                sampleIntervalSeconds = sampleIntervalSeconds,
                 onSearch = onSearch,
                 onDisconnect = onDisconnect,
                 onAliasClick = onAliasClick,
@@ -657,6 +701,7 @@ private fun MonitorTab(
                     savedEntries = savedEntries,
                     bpmColor = bpmColor,
                     colorStops = colorStops,
+                    appSettings = appSettings,
                     selectedRange = selectedRange,
                     onRangeSelected = onRangeSelected,
                 )
@@ -673,7 +718,6 @@ private fun ConnectionPanel(
     connectedName: String?,
     signalRssi: Int?,
     batteryLevel: Int?,
-    sampleIntervalSeconds: Int,
     onSearch: () -> Unit,
     onDisconnect: () -> Unit,
     onAliasClick: () -> Unit,
@@ -881,6 +925,7 @@ private fun HeartRateChart(
     savedEntries: List<HeartRateEntry>,
     bpmColor: Color,
     colorStops: List<ColorStopConfig>,
+    appSettings: AppUiSettings,
     selectedRange: ChartRange,
     onRangeSelected: (ChartRange) -> Unit,
 ) {
@@ -888,14 +933,16 @@ private fun HeartRateChart(
     LaunchedEffect(Unit) {
         while (true) {
             chartNow = System.currentTimeMillis()
-            delay(1000L)
+            delay(LIVE_CHART_FRAME_MS)
         }
     }
 
     val chartEntries = remember(entries, savedEntries) {
         (savedEntries + entries).distinctBy { it.timestamp }.sortedBy { it.timestamp }
     }
-    val chartPoints = remember(chartEntries, selectedRange, chartNow) { chartEntries.toChartPoints(selectedRange, chartNow) }
+    val chartPoints = remember(chartEntries, selectedRange, chartNow, appSettings.continuousTrace) {
+        chartEntries.toChartPoints(selectedRange, chartNow, appSettings.continuousTrace)
+    }
     ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp)) {
         Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -907,7 +954,17 @@ private fun HeartRateChart(
                     RangePill(range, selectedRange == range, Modifier.weight(1f)) { onRangeSelected(range) }
                 }
             }
-            PpmCanvas(chartPoints, selectedRange, bpmColor, colorStops, Modifier.fillMaxWidth().height(246.dp), breakGaps = true)
+            PpmCanvas(
+                points = chartPoints,
+                range = selectedRange,
+                bpmColor = bpmColor,
+                colorStops = colorStops,
+                modifier = Modifier.fillMaxWidth().height(246.dp),
+                breakGaps = true,
+                showGrid = appSettings.showChartGrid,
+                showPointMarkers = appSettings.showPointMarkers,
+                smoothLine = appSettings.smoothChartLine,
+            )
         }
     }
 }
@@ -933,29 +990,25 @@ private fun RangePill(range: ChartRange, selected: Boolean, modifier: Modifier =
 }
 
 @Composable
-private fun ScrollablePpmCanvas(
+private fun CompactDayChart(
     points: List<ChartPoint>,
-    range: ChartRange,
     bpmColor: Color,
     colorStops: List<ColorStopConfig>,
-    height: Dp,
+    appSettings: AppUiSettings,
+    modifier: Modifier = Modifier,
 ) {
-    val scrollState = rememberScrollState()
-    BoxWithConstraints(modifier = Modifier.fillMaxWidth().height(height)) {
-        val chartWidth = when (range) {
-            ChartRange.OneMinute -> maxWidth
-            ChartRange.TenMinutes -> maxWidth * 1.35f
-            ChartRange.OneHour -> maxWidth * 2.4f
-            ChartRange.SixHours -> maxWidth * 4.8f
-            ChartRange.OneDay -> maxWidth * 7f
-        }
-        LaunchedEffect(points.size, range, chartWidth) {
-            if (points.isNotEmpty()) scrollState.scrollTo(scrollState.maxValue)
-        }
-        Box(modifier = Modifier.fillMaxWidth().height(height).horizontalScroll(scrollState)) {
-            PpmCanvas(points, range, bpmColor, colorStops, Modifier.width(chartWidth).height(height), liveLabels = false)
-        }
-    }
+    PpmCanvas(
+        points = points,
+        range = ChartRange.OneDay,
+        bpmColor = bpmColor,
+        colorStops = colorStops,
+        modifier = modifier,
+        breakGaps = true,
+        liveLabels = false,
+        showGrid = appSettings.showChartGrid,
+        showPointMarkers = appSettings.showPointMarkers,
+        smoothLine = appSettings.smoothChartLine,
+    )
 }
 
 @Composable
@@ -967,6 +1020,9 @@ private fun PpmCanvas(
     modifier: Modifier,
     breakGaps: Boolean = true,
     liveLabels: Boolean = true,
+    showGrid: Boolean = true,
+    showPointMarkers: Boolean = true,
+    smoothLine: Boolean = true,
 ) {
     Canvas(modifier = modifier) {
         val viewport = points.resolvePpmViewport()
@@ -986,23 +1042,28 @@ private fun PpmCanvas(
         for (line in 0..4) {
             val y = chartHeight * line / 4f
             val ppmLabel = (maxPpm - (maxPpm - minPpm) * line / 4f).roundToInt()
-            drawLine(gridColor, Offset(leftPad, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+            if (showGrid) {
+                drawLine(gridColor, Offset(leftPad, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+            }
             drawContext.canvas.nativeCanvas.drawText(ppmLabel.toString(), 0f, y + 4.dp.toPx(), paint)
         }
 
         val bucketSize = (range.durationMs / MAX_CHART_BUCKETS).coerceAtLeast(1L)
+        val gapThreshold = max(bucketSize * 4, LIVE_CHART_GAP_THRESHOLD_MS)
         if (points.size > 1) {
             val path = Path()
             val fillPath = Path()
             var lastElapsed: Long? = null
             var segmentOpen = false
             var lastSegmentX = leftPad
+            var previousX = leftPad
+            var previousY = chartHeight
             points.forEachIndexed { index, point ->
                 val normalized = ((point.bpm - minPpm) / (maxPpm - minPpm)).coerceIn(0f, 1f)
                 val x = leftPad + chartWidth * (point.elapsedMs / range.durationMs.toFloat()).coerceIn(0f, 1f)
                 val y = chartHeight - chartHeight * normalized
                 val gap = lastElapsed?.let { point.elapsedMs - it } ?: 0L
-                val shouldBreak = index == 0 || (breakGaps && gap > bucketSize * 3)
+                val shouldBreak = index == 0 || (breakGaps && gap > gapThreshold && !point.held)
                 if (shouldBreak) {
                     if (segmentOpen) {
                         fillPath.lineTo(lastSegmentX, chartHeight)
@@ -1013,9 +1074,16 @@ private fun PpmCanvas(
                     fillPath.lineTo(x, y)
                     segmentOpen = true
                 } else {
-                    path.lineTo(x, y)
+                    val previousWasHeld = points.getOrNull(index - 1)?.held == true
+                    if (smoothLine && !point.held && !previousWasHeld) {
+                        path.quadraticTo(previousX, previousY, x, y)
+                    } else {
+                        path.lineTo(x, y)
+                    }
                     fillPath.lineTo(x, y)
                 }
+                previousX = x
+                previousY = y
                 lastSegmentX = x
                 lastElapsed = point.elapsedMs
             }
@@ -1036,7 +1104,19 @@ private fun PpmCanvas(
                     endY = chartHeight,
                 ),
             )
-            drawPath(path, bpmColor, style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+            drawPath(path, bpmColor, style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+            if (showPointMarkers) {
+                points.filterNot { it.held }.forEach { point ->
+                    val normalized = ((point.bpm - minPpm) / (maxPpm - minPpm)).coerceIn(0f, 1f)
+                    val x = leftPad + chartWidth * (point.elapsedMs / range.durationMs.toFloat()).coerceIn(0f, 1f)
+                    val y = chartHeight - chartHeight * normalized
+                    drawCircle(
+                        color = ppmGradientColor(point.bpm, colorStops),
+                        radius = 2.7.dp.toPx(),
+                        center = Offset(x, y),
+                    )
+                }
+            }
         } else if (points.size == 1) {
             val point = points.first()
             val normalized = ((point.bpm - minPpm) / (maxPpm - minPpm)).coerceIn(0f, 1f)
@@ -1086,6 +1166,7 @@ private fun StatTile(label: String, value: String, modifier: Modifier = Modifier
 private fun HistoryTab(
     summaries: List<DailyHeartRateSummary>,
     colorStops: List<ColorStopConfig>,
+    appSettings: AppUiSettings,
 ) {
     val context = LocalContext.current
     LazyColumn(
@@ -1102,6 +1183,7 @@ private fun HistoryTab(
                 DailySummaryCard(
                     summary = summary,
                     colorStops = colorStops,
+                    appSettings = appSettings,
                     onClick = {
                         context.startActivity(
                             Intent(context, HistoryDetailActivity::class.java).putExtra(EXTRA_DAY_START, summary.dayStartMillis),
@@ -1117,6 +1199,7 @@ private fun HistoryTab(
 private fun DailySummaryCard(
     summary: DailyHeartRateSummary,
     colorStops: List<ColorStopConfig>,
+    appSettings: AppUiSettings,
     onClick: () -> Unit,
 ) {
     ElevatedCard(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp)) {
@@ -1128,6 +1211,12 @@ private fun DailySummaryCard(
                 StatTile("Prom", "${summary.average}", Modifier.weight(1f))
                 StatTile("Max", "${summary.max}", Modifier.weight(1f))
             }
+            Text(
+                text = if (appSettings.showPointMarkers) "Toca para ver el dia completo" else "Vista compacta del dia",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
@@ -1139,7 +1228,10 @@ private fun DayDetailDialog(
     colorStops: List<ColorStopConfig>,
     onDismiss: () -> Unit,
 ) {
-    val points = remember(entries, summary.dayStartMillis) { entries.toDayChartPoints(summary.dayStartMillis) }
+    val appSettings = AppSettingsStore.settings
+    val points = remember(entries, summary.dayStartMillis, appSettings.continuousTrace) {
+        entries.toDayChartPoints(summary.dayStartMillis, appSettings.continuousTrace)
+    }
     val lineColor = ppmGradientColor(summary.average, colorStops)
 
     AlertDialog(
@@ -1148,7 +1240,7 @@ private fun DayDetailDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("00:00 a 23:59 - ${entries.size} muestras", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
-                ScrollablePpmCanvas(points, ChartRange.OneDay, lineColor, colorStops, 220.dp)
+                CompactDayChart(points, lineColor, colorStops, appSettings, Modifier.fillMaxWidth().height(220.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     StatTile("Min", "${summary.min}", Modifier.weight(1f))
                     StatTile("Prom", "${summary.average}", Modifier.weight(1f))
@@ -1176,6 +1268,7 @@ class HistoryDetailActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         HeartRateMonitorRepository.initialize(this)
+        AppSettingsStore.initialize(this)
         val dayStartMillis = intent.getLongExtra(EXTRA_DAY_START, currentDayStartMillis())
         setContent {
             BPMStatsTheme {
@@ -1192,8 +1285,11 @@ private fun HistoryDetailScreen(dayStartMillis: Long, onBack: () -> Unit) {
     val summaries by HeartRateMonitorRepository.dailySummaries.collectAsState()
     val dayEntries = remember(entries, dayStartMillis) { entries.filterForDay(dayStartMillis) }
     val summary = summaries.firstOrNull { it.dayStartMillis == dayStartMillis } ?: dayEntries.toDailySummary(dayStartMillis)
-    val colorStops = remember { defaultColorStops(4) }
-    val points = remember(dayEntries, dayStartMillis) { dayEntries.toDayChartPoints(dayStartMillis) }
+    val appSettings = AppSettingsStore.settings
+    val colorStops = appSettings.colorStops
+    val points = remember(dayEntries, dayStartMillis, appSettings.continuousTrace) {
+        dayEntries.toDayChartPoints(dayStartMillis, appSettings.continuousTrace)
+    }
     val lineColor = ppmGradientColor(summary.average, colorStops)
 
     Scaffold(
@@ -1219,7 +1315,7 @@ private fun HistoryDetailScreen(dayStartMillis: Long, onBack: () -> Unit) {
                 ElevatedCard(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(10.dp)) {
                     Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
                         Text("00:00 a 23:59 - ${dayEntries.size} muestras", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
-                        ScrollablePpmCanvas(points, ChartRange.OneDay, lineColor, colorStops, 260.dp)
+                        CompactDayChart(points, lineColor, colorStops, appSettings, Modifier.fillMaxWidth().height(260.dp))
                     }
                 }
             }
@@ -1254,23 +1350,46 @@ private fun FullScreenMonitor(
     alertState: String?,
     selectedRange: ChartRange,
     colorStops: List<ColorStopConfig>,
+    appSettings: AppUiSettings,
     onExit: () -> Unit,
 ) {
+    val view = LocalView.current
+    val activity = remember(view) { view.context.findActivity() }
+    DisposableEffect(activity, appSettings.keepScreenOnFullscreen) {
+        if (appSettings.keepScreenOnFullscreen) {
+            activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
     var chartNow by remember { mutableStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
             chartNow = System.currentTimeMillis()
-            delay(1000L)
+            delay(LIVE_CHART_FRAME_MS)
         }
     }
     val chartEntries = remember(entries, savedEntries) {
         (savedEntries + entries).distinctBy { it.timestamp }.sortedBy { it.timestamp }
     }
-    val points = remember(chartEntries, selectedRange, chartNow) { chartEntries.toChartPoints(selectedRange, chartNow) }
+    val points = remember(chartEntries, selectedRange, chartNow, appSettings.continuousTrace) {
+        chartEntries.toChartPoints(selectedRange, chartNow, appSettings.continuousTrace)
+    }
     BoxWithConstraints(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         val horizontal = maxWidth > maxHeight
         Box(modifier = Modifier.fillMaxSize().padding(18.dp)) {
-            PpmCanvas(points, selectedRange, bpmColor, colorStops, Modifier.fillMaxSize())
+            PpmCanvas(
+                points = points,
+                range = selectedRange,
+                bpmColor = bpmColor,
+                colorStops = colorStops,
+                modifier = Modifier.fillMaxSize(),
+                showGrid = appSettings.showChartGrid,
+                showPointMarkers = appSettings.showPointMarkers,
+                smoothLine = appSettings.smoothChartLine,
+            )
             if (horizontal) {
                 Row(modifier = Modifier.align(Alignment.Center).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                     PpmHero(currentBpm, bpmColor, alertState)
@@ -1282,6 +1401,24 @@ private fun FullScreenMonitor(
             }
             IconButton(onClick = onExit, modifier = Modifier.align(Alignment.TopEnd)) {
                 Icon(Icons.Default.Fullscreen, contentDescription = "Salir", tint = MaterialTheme.colorScheme.onBackground)
+            }
+            Surface(
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f),
+                tonalElevation = 4.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text("Pantalla encendida", style = MaterialTheme.typography.labelLarge)
+                    Switch(
+                        checked = appSettings.keepScreenOnFullscreen,
+                        onCheckedChange = AppSettingsStore::setKeepScreenOnFullscreen,
+                    )
+                }
             }
         }
     }
@@ -1390,37 +1527,6 @@ private fun ColorSettingsDialog(
                             onStopsChange(normalizedStops.replaceAt(index, stop.copy(ppm = it.coerceIn(minPpm, maxPpm))).normalizedColorStops())
                         },
                     )
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Listo") } },
-    )
-}
-
-@Composable
-private fun MonitorSettingsDialog(
-    overlayEnabled: Boolean,
-    batteryExempt: Boolean,
-    sampleIntervalSeconds: Int,
-    onOverlayChange: (Boolean) -> Unit,
-    onBatteryExemption: () -> Unit,
-    onSampleIntervalChange: (Int) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Ajustes", textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.PictureInPictureAlt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Widget flotante universal", modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
-                    Switch(checked = overlayEnabled, onCheckedChange = onOverlayChange)
-                }
-                SettingSlider("Intervalo", sampleIntervalSeconds, 2f..60f, true, onSampleIntervalChange, suffix = "s")
-                OutlinedButton(onClick = onBatteryExemption, enabled = !batteryExempt, shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
-                    Text(if (batteryExempt) "Bateria lista para monitoreo" else "Permitir toda la noche", textAlign = TextAlign.Center)
                 }
             }
         },
@@ -1540,16 +1646,48 @@ private fun List<ColorStopConfig>.replaceAt(index: Int, value: ColorStopConfig):
     return mapIndexed { currentIndex, current -> if (currentIndex == index) value else current }
 }
 
-private fun List<HeartRateEntry>.toChartPoints(range: ChartRange, now: Long = System.currentTimeMillis()): List<ChartPoint> {
+private fun List<HeartRateEntry>.toChartPoints(
+    range: ChartRange,
+    now: Long = System.currentTimeMillis(),
+    continuousTrace: Boolean = false,
+): List<ChartPoint> {
     val start = now - range.durationMs
     val bucketSize = (range.durationMs / MAX_CHART_BUCKETS).coerceAtLeast(1L)
-    return asSequence()
+    val sorted = sortedBy { it.timestamp }
+    var points = sorted.asSequence()
         .filter { it.timestamp in start..now }
         .groupBy { ((it.timestamp - start) / bucketSize).coerceIn(0, MAX_CHART_BUCKETS - 1L) }
         .toSortedMap()
         .map { (_, entries) ->
             ChartPoint(entries.map { it.bpm }.average().roundToInt(), entries.last().timestamp - start)
         }
+        .toMutableList()
+
+    if (continuousTrace) {
+        val sampleAtWindowStart = sorted.lastOrNull { it.timestamp <= start }
+        if (
+            sampleAtWindowStart != null &&
+            now - sampleAtWindowStart.timestamp <= range.durationMs + CONTINUOUS_TRACE_STALE_MARGIN_MS &&
+            (points.isEmpty() || points.first().elapsedMs > 0L)
+        ) {
+            points.add(0, ChartPoint(sampleAtWindowStart.bpm, 0L, held = true))
+        }
+
+        points = points.withContinuousHolds(LIVE_CHART_FRAME_MS).toMutableList()
+        val lastSample = sorted.lastOrNull { it.timestamp <= now }
+        if (lastSample != null && now - lastSample.timestamp <= range.durationMs + CONTINUOUS_TRACE_STALE_MARGIN_MS) {
+            if (points.isEmpty()) {
+                points += ChartPoint(lastSample.bpm, 0L, held = true)
+            }
+
+            val lastPoint = points.lastOrNull()
+            if (lastPoint == null || lastPoint.elapsedMs < range.durationMs - LIVE_CHART_FRAME_MS) {
+                points += ChartPoint(lastSample.bpm, range.durationMs, held = true)
+            }
+        }
+    }
+
+    return points.sortedBy { it.elapsedMs }
 }
 
 private fun currentDayStartMillis(): Long {
@@ -1583,14 +1721,33 @@ private fun List<HeartRateEntry>.filterForDay(dayStartMillis: Long): List<HeartR
     return filter { it.timestamp in dayStartMillis until dayEndMillis }.sortedBy { it.timestamp }
 }
 
-private fun List<HeartRateEntry>.toDayChartPoints(dayStartMillis: Long): List<ChartPoint> {
+private fun List<HeartRateEntry>.toDayChartPoints(
+    dayStartMillis: Long,
+    continuousTrace: Boolean = false,
+): List<ChartPoint> {
     val bucketSize = (ChartRange.OneDay.durationMs / MAX_CHART_BUCKETS).coerceAtLeast(1L)
-    return filterForDay(dayStartMillis)
+    val points = filterForDay(dayStartMillis)
         .groupBy { ((it.timestamp - dayStartMillis) / bucketSize).coerceIn(0, MAX_CHART_BUCKETS - 1L) }
         .toSortedMap()
         .map { (_, entries) ->
             ChartPoint(entries.map { it.bpm }.average().roundToInt(), entries.last().timestamp - dayStartMillis)
         }
+    return if (continuousTrace) points.withContinuousHolds(bucketSize) else points
+}
+
+private fun List<ChartPoint>.withContinuousHolds(minGapMs: Long): List<ChartPoint> {
+    if (size < 2) return this
+    return buildList {
+        this@withContinuousHolds.forEachIndexed { index, point ->
+            if (index > 0) {
+                val previous = this@withContinuousHolds[index - 1]
+                if (point.elapsedMs - previous.elapsedMs > minGapMs) {
+                    add(ChartPoint(previous.bpm, point.elapsedMs, held = true))
+                }
+            }
+            add(point)
+        }
+    }
 }
 
 private fun List<HeartRateEntry>.toDailySummary(dayStartMillis: Long): DailyHeartRateSummary {
@@ -1661,5 +1818,16 @@ private fun Context.isIgnoringBatteryOptimizations(): Boolean {
     return powerManager.isIgnoringBatteryOptimizations(packageName)
 }
 
+private tailrec fun Context.findActivity(): Activity? {
+    return when (this) {
+        is Activity -> this
+        is android.content.ContextWrapper -> baseContext.findActivity()
+        else -> null
+    }
+}
+
 private const val MAX_CHART_BUCKETS = 180L
+private const val LIVE_CHART_FRAME_MS = 250L
+private const val LIVE_CHART_GAP_THRESHOLD_MS = 20_000L
+private const val CONTINUOUS_TRACE_STALE_MARGIN_MS = 2 * 60 * 1000L
 private const val EXTRA_DAY_START = "extra_day_start"
